@@ -187,12 +187,14 @@ function Chat({ session }) {
   const socketRef = useRef(null);
   const fileInputRef = useRef(null);
   const messageListRef = useRef(null);
+  const settingsRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const typingTimerRef = useRef(null);
   const activeIdRef = useRef(null);
   const readMessageIdsRef = useRef(new Set());
   const loadedConversationRef = useRef(null);
+  const conversationsRef = useRef([]);
 
   const [profile, setProfile] = useState(null);
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'light');
@@ -218,6 +220,8 @@ function Chat({ session }) {
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem('soundOn') !== 'false');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
+  const [unreadCounts, setUnreadCounts] = useState({});
+  const [incomingToasts, setIncomingToasts] = useState([]);
 
   const activeConversation = conversations.find((item) => item.id === activeId);
   const activeBuddy = activeConversation ? otherParticipant(activeConversation, currentUserId) : null;
@@ -240,6 +244,21 @@ function Chat({ session }) {
   useEffect(() => {
     activeIdRef.current = activeId;
   }, [activeId]);
+
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
+  useEffect(() => {
+    function closeSettings(event) {
+      if (settingsRef.current && !settingsRef.current.contains(event.target)) {
+        setSettingsOpen(false);
+      }
+    }
+
+    document.addEventListener('mousedown', closeSettings);
+    return () => document.removeEventListener('mousedown', closeSettings);
+  }, []);
 
   useEffect(() => {
     async function loadInitialData() {
@@ -271,6 +290,12 @@ function Chat({ session }) {
       if (message.conversationId === activeIdRef.current) {
         setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
         setTimeout(scrollMessagesToBottom, 0);
+      } else if (message.senderId !== currentUserId) {
+        setUnreadCounts((current) => ({
+          ...current,
+          [message.conversationId]: (current[message.conversationId] || 0) + 1
+        }));
+        showIncomingToast(message);
       }
       if (message.senderId !== currentUserId) playNotify(soundOn);
       if (message.conversationId === activeIdRef.current && message.senderId !== currentUserId) {
@@ -325,6 +350,7 @@ function Chat({ session }) {
     }
 
     socketRef.current.emit('conversation:join', { conversationId: activeId });
+    setUnreadCounts((current) => ({ ...current, [activeId]: 0 }));
     loadedConversationRef.current = activeId;
     readMessageIdsRef.current = new Set();
     apiFetch(`/api/conversations/${activeId}/messages?limit=30`, token)
@@ -378,6 +404,12 @@ function Chat({ session }) {
     } catch (error) {
       setNotice(error.message);
     }
+  }
+
+  function openConversation(conversationId) {
+    setActiveId(conversationId);
+    setMobileChatOpen(true);
+    setUnreadCounts((current) => ({ ...current, [conversationId]: 0 }));
   }
 
   async function loadOlderMessages() {
@@ -460,6 +492,25 @@ function Chat({ session }) {
     }
   }
 
+  function showIncomingToast(message) {
+    const conversation = conversationsRef.current.find((item) => item.id === message.conversationId);
+    const senderName = message.sender?.display_name || message.sender?.email || 'New message';
+    const preview = message.deletedAt
+      ? 'Message deleted'
+      : message.body || message.attachments?.[0]?.name || 'Sent an attachment';
+    const toast = {
+      id: `${message.id}-${Date.now()}`,
+      conversationId: message.conversationId,
+      title: conversation ? conversationLabel(conversation, currentUserId) : senderName,
+      body: preview
+    };
+
+    setIncomingToasts((current) => [toast, ...current].slice(0, 3));
+    setTimeout(() => {
+      setIncomingToasts((current) => current.filter((item) => item.id !== toast.id));
+    }, 4500);
+  }
+
   function handleTyping(value) {
     setDraft(value);
     if (!activeId || !socketRef.current) return;
@@ -532,15 +583,15 @@ function Chat({ session }) {
               <small className="eyebrow">Signed in</small>
             </span>
           </button>
-          <div className="header-actions">
+          <div className="header-actions" ref={settingsRef}>
             <button className="icon-button" onClick={() => setSettingsOpen(!settingsOpen)} title="Settings" aria-label="Settings">
               <Settings size={18} />
             </button>
             {settingsOpen && (
               <div className="settings-menu">
-                <button onClick={() => setSoundOn(!soundOn)}><Volume2 size={16} /> {soundOn ? 'Sound on' : 'Sound off'}</button>
-                <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />} {theme === 'dark' ? 'Light theme' : 'Dark theme'}</button>
-                <button onClick={signOut}><LogOut size={16} /> Sign out</button>
+                <button onClick={() => { setSoundOn(!soundOn); setSettingsOpen(false); }}><Volume2 size={16} /> {soundOn ? 'Sound on' : 'Sound off'}</button>
+                <button onClick={() => { setTheme(theme === 'dark' ? 'light' : 'dark'); setSettingsOpen(false); }}>{theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />} {theme === 'dark' ? 'Light theme' : 'Dark theme'}</button>
+                <button onClick={() => { setSettingsOpen(false); signOut(); }}><LogOut size={16} /> Sign out</button>
               </div>
             )}
           </div>
@@ -575,12 +626,13 @@ function Chat({ session }) {
             const other = otherParticipant(conversation, currentUserId);
             const active = conversation.id === activeId;
             return (
-              <button key={conversation.id} className={`conversation-row ${active ? 'active' : ''}`} onClick={() => { setActiveId(conversation.id); setMobileChatOpen(true); }}>
+              <button key={conversation.id} className={`conversation-row ${active ? 'active' : ''}`} onClick={() => openConversation(conversation.id)}>
                 <Avatar profile={other} label={conversationLabel(conversation, currentUserId)} online={other && onlineUsers.has(other.id)} />
                 <span>
                   <strong>{conversationLabel(conversation, currentUserId)}</strong>
                   <small>{other && onlineUsers.has(other.id) ? 'Online' : other?.lastSeenAt ? `Last seen ${formatRelative(other.lastSeenAt)}` : formatDate(conversation.updatedAt)}</small>
                 </span>
+                {Boolean(unreadCounts[conversation.id]) && <b className="unread-badge">{unreadCounts[conversation.id]}</b>}
               </button>
             );
           })}
@@ -674,6 +726,14 @@ function Chat({ session }) {
       )}
 
       {notice && <button className="toast" onClick={() => setNotice('')}>{notice}</button>}
+      <div className="incoming-toast-stack">
+        {incomingToasts.map((toast) => (
+          <button key={toast.id} className="incoming-toast" onClick={() => { openConversation(toast.conversationId); setIncomingToasts((current) => current.filter((item) => item.id !== toast.id)); }}>
+            <strong>{toast.title}</strong>
+            <span>{toast.body}</span>
+          </button>
+        ))}
+      </div>
     </main>
   );
 }
@@ -726,7 +786,21 @@ function ProfileModal({ modal, currentUserId, onClose, onSaved, setNotice }) {
   const [displayName, setDisplayName] = useState(person.display_name || '');
   const [avatarUrl, setAvatarUrl] = useState(person.avatar_url || '');
   const [avatarFile, setAvatarFile] = useState(null);
+  const [crop, setCrop] = useState({ zoom: 1, x: 50, y: 50 });
   const [saving, setSaving] = useState(false);
+  const [localPreviewUrl, setLocalPreviewUrl] = useState('');
+  const previewUrl = localPreviewUrl || avatarUrl;
+
+  useEffect(() => {
+    if (!avatarFile) {
+      setLocalPreviewUrl('');
+      return undefined;
+    }
+
+    const objectUrl = URL.createObjectURL(avatarFile);
+    setLocalPreviewUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [avatarFile]);
 
   async function saveProfile(event) {
     event.preventDefault();
@@ -736,7 +810,8 @@ function ProfileModal({ modal, currentUserId, onClose, onSaved, setNotice }) {
     try {
       let nextAvatarUrl = avatarUrl;
       if (avatarFile) {
-        const uploaded = await uploadAvatar(avatarFile, currentUserId);
+        const croppedFile = await cropAvatarFile(avatarFile, crop);
+        const uploaded = await uploadAvatar(croppedFile, currentUserId);
         nextAvatarUrl = uploaded.url;
       }
 
@@ -771,7 +846,7 @@ function ProfileModal({ modal, currentUserId, onClose, onSaved, setNotice }) {
       <section className="profile-modal" onMouseDown={(event) => event.stopPropagation()}>
         <button className="icon-button close-button" onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
         <div className="profile-hero">
-          <Avatar profile={{ ...person, avatar_url: avatarFile ? URL.createObjectURL(avatarFile) : avatarUrl }} label={displayName || person.email || 'User'} large />
+          <Avatar profile={{ ...person, avatar_url: previewUrl }} label={displayName || person.email || 'User'} large />
           <div>
             <span className="eyebrow">{isSelf ? 'Your profile' : 'Buddy profile'}</span>
             <h2>{displayName || person.display_name || person.email}</h2>
@@ -792,6 +867,32 @@ function ProfileModal({ modal, currentUserId, onClose, onSaved, setNotice }) {
                 <input type="file" accept="image/*" onChange={(event) => setAvatarFile(event.target.files?.[0] || null)} />
               </span>
             </label>
+            {previewUrl && (
+              <div className="crop-tool">
+                <div className="crop-preview">
+                  <img
+                    src={previewUrl}
+                    alt=""
+                    style={{
+                      transform: `scale(${crop.zoom})`,
+                      transformOrigin: `${crop.x}% ${crop.y}%`
+                    }}
+                  />
+                </div>
+                <label>
+                  Zoom
+                  <input type="range" min="1" max="2.8" step="0.05" value={crop.zoom} onChange={(event) => setCrop((value) => ({ ...value, zoom: Number(event.target.value) }))} />
+                </label>
+                <label>
+                  Horizontal
+                  <input type="range" min="0" max="100" step="1" value={crop.x} onChange={(event) => setCrop((value) => ({ ...value, x: Number(event.target.value) }))} />
+                </label>
+                <label>
+                  Vertical
+                  <input type="range" min="0" max="100" step="1" value={crop.y} onChange={(event) => setCrop((value) => ({ ...value, y: Number(event.target.value) }))} />
+                </label>
+              </div>
+            )}
             <button className="primary-button" disabled={saving}>{saving ? 'Saving...' : 'Save profile'}</button>
           </form>
         ) : (
@@ -836,6 +937,46 @@ async function uploadAvatar(file, userId) {
   if (error) throw error;
   const { data } = supabase.storage.from('avatars').getPublicUrl(path);
   return { url: data.publicUrl };
+}
+
+async function cropAvatarFile(file, crop) {
+  const image = await loadImageFromFile(file);
+  const size = 512;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext('2d');
+
+  const scale = Math.max(size / image.width, size / image.height) * crop.zoom;
+  const drawWidth = image.width * scale;
+  const drawHeight = image.height * scale;
+  const extraX = Math.max(0, drawWidth - size);
+  const extraY = Math.max(0, drawHeight - size);
+  const dx = -extraX * (crop.x / 100);
+  const dy = -extraY * (crop.y / 100);
+
+  context.fillStyle = '#0f172a';
+  context.fillRect(0, 0, size, size);
+  context.drawImage(image, dx, dy, drawWidth, drawHeight);
+
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+  return new File([blob], `${file.name.replace(/\.[^.]+$/, '')}-avatar.jpg`, { type: 'image/jpeg' });
+}
+
+function loadImageFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const image = new window.Image();
+    const url = URL.createObjectURL(file);
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Could not read image'));
+    };
+    image.src = url;
+  });
 }
 
 function playNotify(enabled) {
