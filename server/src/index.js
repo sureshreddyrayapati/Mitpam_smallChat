@@ -92,12 +92,15 @@ app.post('/api/conversations/direct', requireAuth, async (req, res) => {
 
 app.get('/api/conversations/:id/messages', requireAuth, async (req, res) => {
   try {
-    const messages = await listMessages(req.params.id, req.user.id);
-    if (!messages) {
+    const result = await listMessages(req.params.id, req.user.id, {
+      before: req.query.before,
+      limit: req.query.limit
+    });
+    if (!result) {
       return res.status(404).json({ error: 'Conversation not found' });
     }
 
-    res.json({ messages });
+    res.json(result);
   } catch (error) {
     handleError(res, error);
   }
@@ -172,15 +175,17 @@ io.on('connection', async (socket) => {
     }
   });
 
-  socket.on('message:read', async ({ conversationId }, ack) => {
+  socket.on('message:read', async ({ conversationId, messageIds }, ack) => {
     try {
-      const receipt = await markConversationRead(conversationId, socket.user.id);
-      io.to(`conversation:${conversationId}`).emit('receipt:update', {
-        conversationId,
-        readerId: receipt.readerId,
-        readAt: receipt.readAt,
-        messageIds: receipt.messageIds
-      });
+      const receipt = await markConversationRead(conversationId, socket.user.id, messageIds);
+      if (receipt.messageIds.length) {
+        io.to(`conversation:${conversationId}`).emit('receipt:update', {
+          conversationId,
+          readerId: receipt.readerId,
+          readAt: receipt.readAt,
+          messageIds: receipt.messageIds
+        });
+      }
       ack?.({ ok: true });
     } catch (error) {
       ack?.({ ok: false, error: error.message });
@@ -209,7 +214,10 @@ io.on('connection', async (socket) => {
 
   socket.on('disconnect', async () => {
     const lastSeenAt = await updateLastSeen(socket.user.id);
-    socket.broadcast.emit('presence:offline', { userId: socket.user.id, lastSeenAt });
+    socket.broadcast.emit('presence:offline', {
+      userId: socket.user.id,
+      ...(lastSeenAt ? { lastSeenAt } : {})
+    });
   });
 });
 

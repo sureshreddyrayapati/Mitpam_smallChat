@@ -110,24 +110,39 @@ export async function getConversationForUser(conversationId, userId) {
   return normalizeConversation(data);
 }
 
-export async function listMessages(conversationId, userId) {
+export async function listMessages(conversationId, userId, options = {}) {
   const conversation = await getConversationForUser(conversationId, userId);
   if (!conversation) {
     return null;
   }
 
-  const { data, error } = await supabase
+  const limit = Math.min(Math.max(Number(options.limit) || 30, 1), 50);
+  let query = supabase
     .from('messages')
     .select(messageSelect)
     .eq('conversation_id', conversationId)
-    .order('created_at', { ascending: true })
-    .limit(100);
+    .order('created_at', { ascending: false })
+    .limit(limit + 1);
+
+  if (options.before) {
+    query = query.lt('created_at', options.before);
+  }
+
+  const { data, error } = await query;
 
   if (error) {
     throw error;
   }
 
-  return data.map(normalizeMessage);
+  const hasMore = data.length > limit;
+  const page = data.slice(0, limit);
+  const messages = page.map(normalizeMessage).reverse();
+
+  return {
+    messages,
+    hasMore,
+    nextCursor: hasMore ? page[page.length - 1]?.created_at : null
+  };
 }
 
 export async function searchProfiles(userId, query) {
@@ -291,7 +306,7 @@ export async function deleteMessage(messageId, senderId) {
   return { message: normalizeMessage(data), conversationId: current.conversation_id };
 }
 
-export async function markConversationRead(conversationId, profileId) {
+export async function markConversationRead(conversationId, profileId, messageIds = []) {
   const conversation = await getConversationForUser(conversationId, profileId);
   if (!conversation) {
     const error = new Error('Conversation not found');
@@ -299,20 +314,45 @@ export async function markConversationRead(conversationId, profileId) {
     throw error;
   }
 
-  const { data: messages, error: messagesError } = await supabase
+  let messageQuery = supabase
     .from('messages')
     .select('id, sender_id')
     .eq('conversation_id', conversationId)
     .neq('sender_id', profileId)
-    .is('deleted_at', null)
-    .limit(100);
+    .is('deleted_at', null);
+
+  if (Array.isArray(messageIds) && messageIds.length) {
+    messageQuery = messageQuery.in('id', messageIds.slice(0, 50));
+  } else {
+    messageQuery = messageQuery.order('created_at', { ascending: false }).limit(50);
+  }
+
+  const { data: messages, error: messagesError } = await messageQuery;
 
   if (messagesError) {
     throw messagesError;
   }
 
+  if (!messages.length) {
+    return { conversation, readerId: profileId, messageIds: [], readAt: new Date().toISOString() };
+  }
+
+  const ids = messages.map((message) => message.id);
+  const { data: existingReceipts, error: receiptsError } = await supabase
+    .from('message_receipts')
+    .select('message_id')
+    .eq('profile_id', profileId)
+    .in('message_id', ids);
+
+  if (receiptsError) {
+    throw receiptsError;
+  }
+
+  const existingIds = new Set((existingReceipts || []).map((receipt) => receipt.message_id));
+  const unreadMessages = messages.filter((message) => !existingIds.has(message.id));
+
   const now = new Date().toISOString();
-  const rows = messages.map((message) => ({
+  const rows = unreadMessages.map((message) => ({
     message_id: message.id,
     profile_id: profileId,
     read_at: now
@@ -336,8 +376,17 @@ export async function markConversationRead(conversationId, profileId) {
   };
 }
 
+const lastSeenWrites = new Map();
+
 export async function updateLastSeen(profileId) {
+  const previous = lastSeenWrites.get(profileId) || 0;
+  const nowMs = Date.now();
+  if (nowMs - previous < 60_000) {
+    return null;
+  }
+
   const lastSeenAt = new Date().toISOString();
+  lastSeenWrites.set(profileId, nowMs);
   await supabase
     .from('profiles')
     .update({ last_seen_at: lastSeenAt })

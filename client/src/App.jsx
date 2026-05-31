@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Edit3,
   File,
+  ArrowLeft,
   Image,
   KeyRound,
   LogOut,
@@ -187,12 +188,17 @@ function Chat({ session }) {
   const audioChunksRef = useRef([]);
   const typingTimerRef = useRef(null);
   const activeIdRef = useRef(null);
+  const readMessageIdsRef = useRef(new Set());
+  const loadedConversationRef = useRef(null);
 
   const [profile, setProfile] = useState(null);
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'light');
   const [conversations, setConversations] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [messagesCursor, setMessagesCursor] = useState(null);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [draft, setDraft] = useState('');
   const [newChatQuery, setNewChatQuery] = useState('');
   const [chatSearch, setChatSearch] = useState('');
@@ -208,6 +214,7 @@ function Chat({ session }) {
   const [profileModal, setProfileModal] = useState(null);
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem('soundOn') !== 'false');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [mobileChatOpen, setMobileChatOpen] = useState(false);
 
   const activeConversation = conversations.find((item) => item.id === activeId);
   const activeBuddy = activeConversation ? otherParticipant(activeConversation, currentUserId) : null;
@@ -258,14 +265,19 @@ function Chat({ session }) {
       setConversations((current) => upsertConversation(current, conversation));
     });
     socket.on('message:new', (message) => {
-      setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
+      if (message.conversationId === activeIdRef.current) {
+        setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
+        setTimeout(scrollMessagesToBottom, 0);
+      }
       if (message.senderId !== currentUserId) playNotify(soundOn);
       if (message.conversationId === activeIdRef.current && message.senderId !== currentUserId) {
-        socket.emit('message:read', { conversationId: activeIdRef.current });
+        markMessagesRead(activeIdRef.current, [message]);
       }
     });
     socket.on('message:update', (message) => {
-      setMessages((current) => current.map((item) => item.id === message.id ? message : item));
+      if (message.conversationId === activeIdRef.current) {
+        setMessages((current) => current.map((item) => item.id === message.id ? message : item));
+      }
     });
     socket.on('receipt:update', ({ readerId, readAt, messageIds }) => {
       setMessages((current) => current.map((message) => (
@@ -293,7 +305,9 @@ function Chat({ session }) {
         next.delete(userId);
         return next;
       });
-      setConversations((current) => updateParticipant(current, userId, { lastSeenAt }));
+      if (lastSeenAt) {
+        setConversations((current) => updateParticipant(current, userId, { lastSeenAt }));
+      }
     });
 
     return () => socket.disconnect();
@@ -302,24 +316,29 @@ function Chat({ session }) {
   useEffect(() => {
     if (!activeId || !socketRef.current) {
       setMessages([]);
+      setMessagesCursor(null);
+      setHasOlderMessages(false);
       return;
     }
 
     socketRef.current.emit('conversation:join', { conversationId: activeId });
-    apiFetch(`/api/conversations/${activeId}/messages`, token)
+    loadedConversationRef.current = activeId;
+    readMessageIdsRef.current = new Set();
+    apiFetch(`/api/conversations/${activeId}/messages?limit=30`, token)
       .then((response) => {
+        if (loadedConversationRef.current !== activeId) return;
         setMessages(response.messages);
-        socketRef.current?.emit('message:read', { conversationId: activeId });
+        setMessagesCursor(response.nextCursor);
+        setHasOlderMessages(response.hasMore);
+        markMessagesRead(activeId, response.messages);
+        setTimeout(scrollMessagesToBottom, 0);
       })
       .catch((error) => setNotice(error.message));
   }, [activeId, token]);
 
   useEffect(() => {
-    const list = messageListRef.current;
-    if (list) {
-      list.scrollTop = list.scrollHeight;
-    }
-  }, [messages.length, activeId]);
+    setTimeout(scrollMessagesToBottom, 0);
+  }, [activeId]);
 
   useEffect(() => {
     const query = newChatQuery.trim();
@@ -352,8 +371,32 @@ function Chat({ session }) {
       setActiveId(conversation.id);
       setNewChatQuery('');
       setProfileResults([]);
+      setMobileChatOpen(true);
     } catch (error) {
       setNotice(error.message);
+    }
+  }
+
+  async function loadOlderMessages() {
+    if (!activeId || !messagesCursor || loadingOlder) return;
+
+    const list = messageListRef.current;
+    const previousHeight = list?.scrollHeight || 0;
+    setLoadingOlder(true);
+    try {
+      const response = await apiFetch(`/api/conversations/${activeId}/messages?limit=30&before=${encodeURIComponent(messagesCursor)}`, token);
+      setMessages((current) => mergeMessages(response.messages, current));
+      setMessagesCursor(response.nextCursor);
+      setHasOlderMessages(response.hasMore);
+      setTimeout(() => {
+        if (list) {
+          list.scrollTop = list.scrollHeight - previousHeight;
+        }
+      }, 0);
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setLoadingOlder(false);
     }
   }
 
@@ -386,6 +429,31 @@ function Chat({ session }) {
   function handleAck(response) {
     if (!response?.ok) {
       setNotice(response?.error || 'Action failed');
+    }
+  }
+
+  function markMessagesRead(conversationId, candidateMessages) {
+    if (!conversationId || !socketRef.current) return;
+
+    const unreadIds = candidateMessages
+      .filter((message) => message.senderId !== currentUserId && !message.receipts?.some((receipt) => receipt.profileId === currentUserId))
+      .map((message) => message.id)
+      .filter((messageId) => !readMessageIdsRef.current.has(messageId));
+
+    if (!unreadIds.length) return;
+
+    unreadIds.forEach((messageId) => readMessageIdsRef.current.add(messageId));
+    socketRef.current.emit('message:read', { conversationId, messageIds: unreadIds }, (response) => {
+      if (!response?.ok) {
+        unreadIds.forEach((messageId) => readMessageIdsRef.current.delete(messageId));
+      }
+    });
+  }
+
+  function scrollMessagesToBottom() {
+    const list = messageListRef.current;
+    if (list) {
+      list.scrollTop = list.scrollHeight;
     }
   }
 
@@ -451,7 +519,7 @@ function Chat({ session }) {
       : 'Offline';
 
   return (
-    <main className="chat-shell">
+    <main className={`chat-shell ${mobileChatOpen ? 'mobile-chat-open' : ''}`}>
       <aside className="sidebar">
         <header className="sidebar-header">
           <button className="profile-chip" onClick={() => setProfileModal({ type: 'self', profile })}>
@@ -504,7 +572,7 @@ function Chat({ session }) {
             const other = otherParticipant(conversation, currentUserId);
             const active = conversation.id === activeId;
             return (
-              <button key={conversation.id} className={`conversation-row ${active ? 'active' : ''}`} onClick={() => setActiveId(conversation.id)}>
+              <button key={conversation.id} className={`conversation-row ${active ? 'active' : ''}`} onClick={() => { setActiveId(conversation.id); setMobileChatOpen(true); }}>
                 <Avatar profile={other} label={conversationLabel(conversation, currentUserId)} online={other && onlineUsers.has(other.id)} />
                 <span>
                   <strong>{conversationLabel(conversation, currentUserId)}</strong>
@@ -521,6 +589,9 @@ function Chat({ session }) {
         {activeConversation ? (
           <>
             <header className="chat-header">
+              <button className="icon-button mobile-back" onClick={() => setMobileChatOpen(false)} title="Back to chats" aria-label="Back to chats">
+                <ArrowLeft size={18} />
+              </button>
               <button className="chat-person" onClick={() => setProfileModal({ type: 'buddy', profile: activeBuddy })}>
                 <Avatar profile={activeBuddy} label={conversationLabel(activeConversation, currentUserId)} online={activeBuddy && onlineUsers.has(activeBuddy.id)} />
                 <span>
@@ -531,6 +602,11 @@ function Chat({ session }) {
             </header>
 
             <div className="message-list" ref={messageListRef}>
+              {hasOlderMessages && (
+                <button className="load-older" onClick={loadOlderMessages} disabled={loadingOlder}>
+                  {loadingOlder ? 'Loading...' : 'Load older messages'}
+                </button>
+              )}
               {messages.map((message) => (
                 <MessageBubble
                   key={message.id}
@@ -802,6 +878,15 @@ function updateParticipant(conversations, userId, patch) {
       participant.id === userId ? { ...participant, ...patch } : participant
     ))
   }));
+}
+
+function mergeMessages(olderMessages, currentMessages) {
+  const byId = new Map();
+  for (const message of [...olderMessages, ...currentMessages]) {
+    byId.set(message.id, message);
+  }
+
+  return [...byId.values()].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 }
 
 function upsertReceipt(message, receipt) {
