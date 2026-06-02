@@ -7,6 +7,7 @@ import {
   Edit3,
   File,
   ArrowLeft,
+  Bell,
   Image,
   KeyRound,
   LogOut,
@@ -188,6 +189,7 @@ function Chat({ session }) {
   const fileInputRef = useRef(null);
   const messageListRef = useRef(null);
   const settingsRef = useRef(null);
+  const notificationsRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const typingTimerRef = useRef(null);
@@ -207,7 +209,10 @@ function Chat({ session }) {
   const [draft, setDraft] = useState('');
   const [newChatQuery, setNewChatQuery] = useState('');
   const [chatSearch, setChatSearch] = useState('');
-  const [profileResults, setProfileResults] = useState([]);
+  const [sidebarTab, setSidebarTab] = useState('chats');
+  const [allUsers, setAllUsers] = useState([]);
+  const [friends, setFriends] = useState([]);
+  const [friendRequests, setFriendRequests] = useState([]);
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -222,6 +227,8 @@ function Chat({ session }) {
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [unreadCounts, setUnreadCounts] = useState({});
   const [incomingToasts, setIncomingToasts] = useState([]);
+  const [notificationOpen, setNotificationOpen] = useState(false);
+  const [notifications, setNotifications] = useState([]);
 
   const activeConversation = conversations.find((item) => item.id === activeId);
   const activeBuddy = activeConversation ? otherParticipant(activeConversation, currentUserId) : null;
@@ -231,6 +238,15 @@ function Chat({ session }) {
     if (!value) return conversations;
     return conversations.filter((conversation) => conversationLabel(conversation, currentUserId).toLowerCase().includes(value));
   }, [chatSearch, conversations, currentUserId]);
+
+  const visibleUsers = useMemo(() => {
+    const value = newChatQuery.trim().toLowerCase();
+    if (!value) return allUsers;
+    return allUsers.filter((user) => (
+      user.display_name?.toLowerCase().includes(value)
+      || user.email?.toLowerCase().includes(value)
+    ));
+  }, [allUsers, newChatQuery]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -254,6 +270,9 @@ function Chat({ session }) {
       if (settingsRef.current && !settingsRef.current.contains(event.target)) {
         setSettingsOpen(false);
       }
+      if (notificationsRef.current && !notificationsRef.current.contains(event.target)) {
+        setNotificationOpen(false);
+      }
     }
 
     document.addEventListener('mousedown', closeSettings);
@@ -270,6 +289,7 @@ function Chat({ session }) {
         setProfile(meResponse.profile);
         setConversations(conversationsResponse.conversations);
         setActiveId(conversationsResponse.conversations[0]?.id || null);
+        loadSocialData();
       } catch (error) {
         setNotice(error.message);
       }
@@ -285,6 +305,23 @@ function Chat({ session }) {
     socket.on('connect_error', (error) => setNotice(error.message));
     socket.on('conversation:upsert', (conversation) => {
       setConversations((current) => upsertConversation(current, conversation));
+      loadSocialData();
+    });
+    socket.on('friend-request:new', () => {
+      loadSocialData();
+      addSimpleNotification({
+        type: 'friend-request',
+        title: 'New friend request',
+        body: 'Open notifications to respond'
+      });
+      setIncomingToasts((current) => [{
+        id: `friend-${Date.now()}`,
+        title: 'New friend request',
+        body: 'Open All Users to respond'
+      }, ...current].slice(0, 3));
+    });
+    socket.on('friend-request:update', () => {
+      loadSocialData();
     });
     socket.on('message:new', (message) => {
       if (message.conversationId === activeIdRef.current) {
@@ -295,6 +332,7 @@ function Chat({ session }) {
           ...current,
           [message.conversationId]: (current[message.conversationId] || 0) + 1
         }));
+        addMessageNotification(message);
         showIncomingToast(message);
       }
       if (message.senderId !== currentUserId) playNotify(soundOn);
@@ -369,22 +407,6 @@ function Chat({ session }) {
     setTimeout(scrollMessagesToBottom, 0);
   }, [activeId]);
 
-  useEffect(() => {
-    const query = newChatQuery.trim();
-    if (query.length < 2) {
-      setProfileResults([]);
-      return undefined;
-    }
-
-    const timer = setTimeout(() => {
-      apiFetch(`/api/profiles/search?q=${encodeURIComponent(query)}`, token)
-        .then((response) => setProfileResults(response.profiles))
-        .catch((error) => setNotice(error.message));
-    }, 250);
-
-    return () => clearTimeout(timer);
-  }, [newChatQuery, token]);
-
   async function startChat(target = newChatQuery) {
     const value = String(target).trim();
     if (!value) return;
@@ -399,17 +421,70 @@ function Chat({ session }) {
       setConversations((current) => upsertConversation(current, conversation));
       setActiveId(conversation.id);
       setNewChatQuery('');
-      setProfileResults([]);
       setMobileChatOpen(true);
     } catch (error) {
       setNotice(error.message);
     }
   }
 
+  async function loadSocialData() {
+    try {
+      const [usersResponse, friendsResponse, requestsResponse] = await Promise.all([
+        apiFetch('/api/users', token),
+        apiFetch('/api/friends', token),
+        apiFetch('/api/friend-requests', token)
+      ]);
+      setAllUsers(usersResponse.users);
+      setFriends(friendsResponse.friends);
+      setFriendRequests(requestsResponse.requests);
+      setNotifications((current) => syncRequestNotifications(current, requestsResponse.requests));
+    } catch (error) {
+      setNotice(error.message);
+    }
+  }
+
+  async function sendRequest(recipientId) {
+    try {
+      await apiFetch('/api/friend-requests', token, {
+        method: 'POST',
+        body: JSON.stringify({ recipientId })
+      });
+      await loadSocialData();
+    } catch (error) {
+      setNotice(error.message);
+    }
+  }
+
+  async function respondToRequest(requestId, action) {
+    try {
+      const response = await apiFetch(`/api/friend-requests/${requestId}/${action}`, token, {
+        method: 'POST',
+        body: JSON.stringify({})
+      });
+      if (response.conversation) {
+        setConversations((current) => upsertConversation(current, response.conversation));
+      }
+      await loadSocialData();
+    } catch (error) {
+      setNotice(error.message);
+    }
+  }
+
+  function openFriendChat(friendId) {
+    const conversation = conversations.find((item) => item.participants.some((participant) => participant.id === friendId));
+    if (conversation) {
+      openConversation(conversation.id);
+      return;
+    }
+    startChat(friendId);
+  }
+
   function openConversation(conversationId) {
     setActiveId(conversationId);
     setMobileChatOpen(true);
     setUnreadCounts((current) => ({ ...current, [conversationId]: 0 }));
+    setNotifications((current) => current.filter((item) => item.conversationId !== conversationId));
+    setNotificationOpen(false);
   }
 
   async function loadOlderMessages() {
@@ -511,6 +586,32 @@ function Chat({ session }) {
     }, 4500);
   }
 
+  function addSimpleNotification(notification) {
+    playNotify(soundOn);
+    const item = {
+      id: `${notification.type}-${Date.now()}`,
+      createdAt: new Date().toISOString(),
+      ...notification
+    };
+    setNotifications((current) => [item, ...current].slice(0, 20));
+  }
+
+  function addMessageNotification(message) {
+    const conversation = conversationsRef.current.find((item) => item.id === message.conversationId);
+    const senderName = message.sender?.display_name || message.sender?.email || 'New message';
+    const preview = message.body || message.attachments?.[0]?.name || 'Sent an attachment';
+    const item = {
+      id: `message-${message.id}`,
+      type: 'message',
+      conversationId: message.conversationId,
+      title: conversation ? conversationLabel(conversation, currentUserId) : senderName,
+      body: preview,
+      createdAt: message.createdAt || new Date().toISOString()
+    };
+
+    setNotifications((current) => [item, ...current.filter((existing) => existing.id !== item.id)].slice(0, 20));
+  }
+
   function handleTyping(value) {
     setDraft(value);
     if (!activeId || !socketRef.current) return;
@@ -571,6 +672,9 @@ function Chat({ session }) {
     : activeBuddy?.lastSeenAt
       ? `Last seen ${formatRelative(activeBuddy.lastSeenAt)}`
       : 'Offline';
+  const incomingRequestCount = friendRequests.filter((request) => request.direction === 'incoming').length;
+  const messageNotificationCount = notifications.filter((item) => item.type !== 'friend-request').length;
+  const notificationCount = incomingRequestCount + messageNotificationCount;
 
   return (
     <main className={`chat-shell ${mobileChatOpen ? 'mobile-chat-open' : ''}`}>
@@ -583,61 +687,140 @@ function Chat({ session }) {
               <small className="eyebrow">Signed in</small>
             </span>
           </button>
-          <div className="header-actions" ref={settingsRef}>
-            <button className="icon-button" onClick={() => setSettingsOpen(!settingsOpen)} title="Settings" aria-label="Settings">
-              <Settings size={18} />
-            </button>
-            {settingsOpen && (
-              <div className="settings-menu">
-                <button onClick={() => { setSoundOn(!soundOn); setSettingsOpen(false); }}><Volume2 size={16} /> {soundOn ? 'Sound on' : 'Sound off'}</button>
-                <button onClick={() => { setTheme(theme === 'dark' ? 'light' : 'dark'); setSettingsOpen(false); }}>{theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />} {theme === 'dark' ? 'Light theme' : 'Dark theme'}</button>
-                <button onClick={() => { setSettingsOpen(false); signOut(); }}><LogOut size={16} /> Sign out</button>
-              </div>
-            )}
+          <div className="header-actions">
+            <div className="notification-wrap" ref={notificationsRef}>
+              <button className="icon-button" onClick={() => setNotificationOpen(!notificationOpen)} title="Notifications" aria-label="Notifications">
+                <Bell size={18} />
+                {notificationCount > 0 && <b className="header-badge">{notificationCount}</b>}
+              </button>
+              {notificationOpen && (
+                <div className="notification-panel">
+                  <header>
+                    <strong>Notifications</strong>
+                    {messageNotificationCount > 0 && <button onClick={() => setNotifications((current) => current.filter((item) => item.type === 'friend-request'))}>Clear</button>}
+                  </header>
+                  <div className="notification-list">
+                    {friendRequests.filter((request) => request.direction === 'incoming').map((request) => (
+                      <div key={request.id} className="notification-item request">
+                        <Avatar profile={request.requester} />
+                        <span>
+                          <strong>{request.requester.display_name}</strong>
+                          <small>Sent you a friend request</small>
+                        </span>
+                        <button onClick={() => respondToRequest(request.id, 'accept')}>Accept</button>
+                        <button className="ghost-action" onClick={() => respondToRequest(request.id, 'reject')}>Reject</button>
+                      </div>
+                    ))}
+                    {notifications.filter((item) => item.type !== 'friend-request').map((item) => (
+                      <button key={item.id} className="notification-item" onClick={() => item.conversationId && openConversation(item.conversationId)}>
+                        <span>
+                          <strong>{item.title}</strong>
+                          <small>{item.body}</small>
+                        </span>
+                      </button>
+                    ))}
+                    {!notifications.length && !friendRequests.some((request) => request.direction === 'incoming') && (
+                      <p className="empty-state compact">No notifications yet.</p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="settings-wrap" ref={settingsRef}>
+              <button className="icon-button" onClick={() => setSettingsOpen(!settingsOpen)} title="Settings" aria-label="Settings">
+                <Settings size={18} />
+              </button>
+              {settingsOpen && (
+                <div className="settings-menu">
+                  <button onClick={() => { setSoundOn(!soundOn); setSettingsOpen(false); }}><Volume2 size={16} /> {soundOn ? 'Sound on' : 'Sound off'}</button>
+                  <button onClick={() => { setTheme(theme === 'dark' ? 'light' : 'dark'); setSettingsOpen(false); }}>{theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />} {theme === 'dark' ? 'Light theme' : 'Dark theme'}</button>
+                  <button onClick={() => { setSettingsOpen(false); signOut(); }}><LogOut size={16} /> Sign out</button>
+                </div>
+              )}
+            </div>
           </div>
         </header>
 
-        <form className="new-chat" onSubmit={(event) => { event.preventDefault(); startChat(); }}>
-          <input value={newChatQuery} onChange={(event) => setNewChatQuery(event.target.value)} placeholder="Search name or email" />
-          <button className="icon-button filled" title="Start chat" aria-label="Start chat"><Plus size={18} /></button>
+        <form className="new-chat" onSubmit={(event) => { event.preventDefault(); setSidebarTab('users'); }}>
+          <input value={newChatQuery} onChange={(event) => { setNewChatQuery(event.target.value); setSidebarTab('users'); }} placeholder="Find users to request" />
+          <button className="icon-button filled" title="Find users" aria-label="Find users"><Search size={18} /></button>
         </form>
 
-        {profileResults.length > 0 && (
-          <div className="search-results">
-            {profileResults.map((result) => (
-              <button key={result.id} onClick={() => startChat(result.id)}>
-                <Avatar profile={result} />
+        <div className="sidebar-tabs">
+          <button className={sidebarTab === 'chats' ? 'active' : ''} onClick={() => setSidebarTab('chats')}>Chats</button>
+          <button className={sidebarTab === 'friends' ? 'active' : ''} onClick={() => setSidebarTab('friends')}>Friends</button>
+          <button className={sidebarTab === 'users' ? 'active' : ''} onClick={() => setSidebarTab('users')}>All Users</button>
+        </div>
+
+        {sidebarTab === 'chats' && (
+          <>
+            <label className="search-box">
+              <Search size={17} />
+              <input value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} placeholder="Filter chats" />
+            </label>
+
+            <div className="conversation-list">
+              {visibleConversations.map((conversation) => {
+                const other = otherParticipant(conversation, currentUserId);
+                const active = conversation.id === activeId;
+                return (
+                  <button key={conversation.id} className={`conversation-row ${active ? 'active' : ''}`} onClick={() => openConversation(conversation.id)}>
+                    <Avatar profile={other} label={conversationLabel(conversation, currentUserId)} online={other && onlineUsers.has(other.id)} />
+                    <span>
+                      <strong>{conversationLabel(conversation, currentUserId)}</strong>
+                      <small>{other && onlineUsers.has(other.id) ? 'Online' : other?.lastSeenAt ? `Last seen ${formatRelative(other.lastSeenAt)}` : formatDate(conversation.updatedAt)}</small>
+                    </span>
+                    {Boolean(unreadCounts[conversation.id]) && <b className="unread-badge">{unreadCounts[conversation.id]}</b>}
+                  </button>
+                );
+              })}
+              {!visibleConversations.length && <p className="empty-state">No conversations yet.</p>}
+            </div>
+          </>
+        )}
+
+        {sidebarTab === 'friends' && (
+          <div className="conversation-list social-list">
+            {friends.map((friend) => (
+              <div key={friend.id} className="social-row">
+                <Avatar profile={friend} online={onlineUsers.has(friend.id)} />
                 <span>
-                  <strong>{result.display_name}</strong>
-                  <small>{result.email}</small>
+                  <strong>{friend.display_name}</strong>
+                  <small>{onlineUsers.has(friend.id) ? 'Online' : friend.lastSeenAt ? `Last seen ${formatRelative(friend.lastSeenAt)}` : friend.email}</small>
                 </span>
-              </button>
+                <button onClick={() => openFriendChat(friend.id)}>Chat</button>
+              </div>
             ))}
+            {!friends.length && <p className="empty-state">Accepted friends will appear here.</p>}
           </div>
         )}
 
-        <label className="search-box">
-          <Search size={17} />
-          <input value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} placeholder="Filter chats" />
-        </label>
-
-        <div className="conversation-list">
-          {visibleConversations.map((conversation) => {
-            const other = otherParticipant(conversation, currentUserId);
-            const active = conversation.id === activeId;
-            return (
-              <button key={conversation.id} className={`conversation-row ${active ? 'active' : ''}`} onClick={() => openConversation(conversation.id)}>
-                <Avatar profile={other} label={conversationLabel(conversation, currentUserId)} online={other && onlineUsers.has(other.id)} />
+        {sidebarTab === 'users' && (
+          <div className="conversation-list social-list">
+            {friendRequests.filter((request) => request.direction === 'incoming').map((request) => (
+              <div key={request.id} className="social-row request-row">
+                <Avatar profile={request.requester} />
                 <span>
-                  <strong>{conversationLabel(conversation, currentUserId)}</strong>
-                  <small>{other && onlineUsers.has(other.id) ? 'Online' : other?.lastSeenAt ? `Last seen ${formatRelative(other.lastSeenAt)}` : formatDate(conversation.updatedAt)}</small>
+                  <strong>{request.requester.display_name}</strong>
+                  <small>Wants to connect</small>
                 </span>
-                {Boolean(unreadCounts[conversation.id]) && <b className="unread-badge">{unreadCounts[conversation.id]}</b>}
-              </button>
-            );
-          })}
-          {!visibleConversations.length && <p className="empty-state">No conversations yet.</p>}
-        </div>
+                <button onClick={() => respondToRequest(request.id, 'accept')}>Accept</button>
+                <button className="ghost-action" onClick={() => respondToRequest(request.id, 'reject')}>Reject</button>
+              </div>
+            ))}
+            {visibleUsers.map((user) => (
+              <div key={user.id} className="social-row">
+                <Avatar profile={user} online={onlineUsers.has(user.id)} />
+                <span>
+                  <strong>{user.display_name}</strong>
+                  <small>{user.email}</small>
+                </span>
+                <RelationshipAction user={user} onRequest={sendRequest} onChat={openFriendChat} />
+              </div>
+            ))}
+            {!visibleUsers.length && <p className="empty-state">No registered users found.</p>}
+          </div>
+        )}
       </aside>
 
       <section className="chat-panel">
@@ -728,7 +911,7 @@ function Chat({ session }) {
       {notice && <button className="toast" onClick={() => setNotice('')}>{notice}</button>}
       <div className="incoming-toast-stack">
         {incomingToasts.map((toast) => (
-          <button key={toast.id} className="incoming-toast" onClick={() => { openConversation(toast.conversationId); setIncomingToasts((current) => current.filter((item) => item.id !== toast.id)); }}>
+          <button key={toast.id} className="incoming-toast" onClick={() => { if (toast.conversationId) openConversation(toast.conversationId); setIncomingToasts((current) => current.filter((item) => item.id !== toast.id)); }}>
             <strong>{toast.title}</strong>
             <span>{toast.body}</span>
           </button>
@@ -736,6 +919,28 @@ function Chat({ session }) {
       </div>
     </main>
   );
+}
+
+function RelationshipAction({ user, onRequest, onChat }) {
+  const relationship = user.relationship || { status: 'none' };
+
+  if (relationship.status === 'friend') {
+    return <button onClick={() => onChat(user.id)}>Chat</button>;
+  }
+
+  if (relationship.status === 'pending' && relationship.direction === 'outgoing') {
+    return <button disabled>Requested</button>;
+  }
+
+  if (relationship.status === 'pending' && relationship.direction === 'incoming') {
+    return <button disabled>Pending</button>;
+  }
+
+  if (relationship.status === 'rejected') {
+    return <button onClick={() => onRequest(user.id)}>Request again</button>;
+  }
+
+  return <button onClick={() => onRequest(user.id)}>Request</button>;
 }
 
 function MessageBubble({ message, own, isRead, onEdit, onDelete }) {
@@ -1022,6 +1227,21 @@ function updateParticipant(conversations, userId, patch) {
       participant.id === userId ? { ...participant, ...patch } : participant
     ))
   }));
+}
+
+function syncRequestNotifications(currentNotifications, requests) {
+  const incomingRequests = requests.filter((request) => request.direction === 'incoming');
+  const requestNotifications = incomingRequests.map((request) => ({
+    id: `request-${request.id}`,
+    type: 'friend-request',
+    requestId: request.id,
+    title: request.requester.display_name,
+    body: 'Sent you a friend request',
+    createdAt: request.createdAt
+  }));
+  const nonRequestNotifications = currentNotifications.filter((item) => item.type !== 'friend-request');
+
+  return [...requestNotifications, ...nonRequestNotifications].slice(0, 20);
 }
 
 function mergeMessages(olderMessages, currentMessages) {

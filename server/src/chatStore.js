@@ -165,6 +165,194 @@ export async function searchProfiles(userId, query) {
   return data.map(normalizeProfile);
 }
 
+export async function listUsersWithFriendState(userId) {
+  const { data: profiles, error: profilesError } = await supabase
+    .from('profiles')
+    .select(profileSelect)
+    .neq('id', userId)
+    .order('display_name', { ascending: true })
+    .limit(100);
+
+  if (profilesError) throw profilesError;
+
+  const { data: requests, error: requestsError } = await supabase
+    .from('friend_requests')
+    .select('id, requester_id, recipient_id, status, created_at')
+    .or(`requester_id.eq.${userId},recipient_id.eq.${userId}`);
+
+  if (requestsError) throw requestsError;
+
+  const { data: friendships, error: friendshipsError } = await supabase
+    .from('friendships')
+    .select('profile_a, profile_b')
+    .or(`profile_a.eq.${userId},profile_b.eq.${userId}`);
+
+  if (friendshipsError) throw friendshipsError;
+
+  const friendIds = new Set(friendships.map((row) => row.profile_a === userId ? row.profile_b : row.profile_a));
+  const requestByUser = new Map();
+  for (const request of requests) {
+    const otherId = request.requester_id === userId ? request.recipient_id : request.requester_id;
+    requestByUser.set(otherId, {
+      id: request.id,
+      status: request.status,
+      direction: request.requester_id === userId ? 'outgoing' : 'incoming',
+      createdAt: request.created_at
+    });
+  }
+
+  return profiles.map((profile) => ({
+    ...normalizeProfile(profile),
+    relationship: friendIds.has(profile.id)
+      ? { status: 'friend' }
+      : requestByUser.get(profile.id) || { status: 'none' }
+  }));
+}
+
+export async function listFriendRequests(userId) {
+  const { data, error } = await supabase
+    .from('friend_requests')
+    .select(`
+      id,
+      requester_id,
+      recipient_id,
+      status,
+      created_at,
+      requester:profiles!friend_requests_requester_id_fkey (${profileSelect}),
+      recipient:profiles!friend_requests_recipient_id_fkey (${profileSelect})
+    `)
+    .or(`requester_id.eq.${userId},recipient_id.eq.${userId}`)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false });
+
+  if (error) throw error;
+
+  return data.map((request) => ({
+    id: request.id,
+    requesterId: request.requester_id,
+    recipientId: request.recipient_id,
+    status: request.status,
+    createdAt: request.created_at,
+    direction: request.requester_id === userId ? 'outgoing' : 'incoming',
+    requester: normalizeProfile(request.requester),
+    recipient: normalizeProfile(request.recipient)
+  }));
+}
+
+export async function listFriends(userId) {
+  const users = await listUsersWithFriendState(userId);
+  return users.filter((user) => user.relationship.status === 'friend');
+}
+
+export async function sendFriendRequest(requesterId, recipientId) {
+  if (requesterId === recipientId) {
+    const error = new Error('You cannot send a request to yourself');
+    error.status = 400;
+    throw error;
+  }
+
+  const pair = normalizeFriendPair(requesterId, recipientId);
+  const { data: existingFriend } = await supabase
+    .from('friendships')
+    .select('profile_a')
+    .eq('profile_a', pair.profileA)
+    .eq('profile_b', pair.profileB)
+    .maybeSingle();
+
+  if (existingFriend) {
+    const error = new Error('Already friends');
+    error.status = 400;
+    throw error;
+  }
+
+  const { data: reverseRequest } = await supabase
+    .from('friend_requests')
+    .select('id, status')
+    .eq('requester_id', recipientId)
+    .eq('recipient_id', requesterId)
+    .eq('status', 'pending')
+    .maybeSingle();
+
+  if (reverseRequest) {
+    return acceptFriendRequest(reverseRequest.id, requesterId);
+  }
+
+  const { data, error } = await supabase
+    .from('friend_requests')
+    .upsert(
+      { requester_id: requesterId, recipient_id: recipientId, status: 'pending', responded_at: null },
+      { onConflict: 'requester_id,recipient_id' }
+    )
+    .select('id, requester_id, recipient_id, status, created_at')
+    .single();
+
+  if (error) throw error;
+
+  return {
+    request: {
+      id: data.id,
+      requesterId: data.requester_id,
+      recipientId: data.recipient_id,
+      status: data.status,
+      createdAt: data.created_at
+    }
+  };
+}
+
+export async function acceptFriendRequest(requestId, recipientId) {
+  const { data: request, error: requestError } = await supabase
+    .from('friend_requests')
+    .select('id, requester_id, recipient_id, status')
+    .eq('id', requestId)
+    .eq('recipient_id', recipientId)
+    .eq('status', 'pending')
+    .maybeSingle();
+
+  if (requestError) throw requestError;
+  if (!request) {
+    const error = new Error('Friend request not found');
+    error.status = 404;
+    throw error;
+  }
+
+  const pair = normalizeFriendPair(request.requester_id, request.recipient_id);
+  const { error: friendshipError } = await supabase
+    .from('friendships')
+    .upsert({ profile_a: pair.profileA, profile_b: pair.profileB }, { onConflict: 'profile_a,profile_b' });
+
+  if (friendshipError) throw friendshipError;
+
+  const { error: updateError } = await supabase
+    .from('friend_requests')
+    .update({ status: 'accepted', responded_at: new Date().toISOString() })
+    .eq('id', request.id);
+
+  if (updateError) throw updateError;
+
+  const conversation = await createDirectConversation(request.recipient_id, request.requester_id);
+  return { request, conversation };
+}
+
+export async function rejectFriendRequest(requestId, recipientId) {
+  const { data, error } = await supabase
+    .from('friend_requests')
+    .update({ status: 'rejected', responded_at: new Date().toISOString() })
+    .eq('id', requestId)
+    .eq('recipient_id', recipientId)
+    .eq('status', 'pending')
+    .select('id, requester_id, recipient_id, status')
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) {
+    const notFound = new Error('Friend request not found');
+    notFound.status = 404;
+    throw notFound;
+  }
+
+  return data;
+}
+
 export async function createDirectConversation(currentUserId, emailOrUserId) {
   const normalized = emailOrUserId.trim().toLowerCase();
   const query = supabase.from('profiles').select(profileSelect);
@@ -185,6 +373,13 @@ export async function createDirectConversation(currentUserId, emailOrUserId) {
   if (otherProfile.id === currentUserId) {
     const error = new Error('You cannot start a chat with yourself');
     error.status = 400;
+    throw error;
+  }
+
+  const friends = await areFriends(currentUserId, otherProfile.id);
+  if (!friends) {
+    const error = new Error('Send a friend request first');
+    error.status = 403;
     throw error;
   }
 
@@ -475,6 +670,25 @@ function getMessageType(attachments) {
   if (firstType.startsWith('audio/')) return 'audio';
   if (attachments.length) return 'file';
   return 'text';
+}
+
+function normalizeFriendPair(userA, userB) {
+  return userA < userB
+    ? { profileA: userA, profileB: userB }
+    : { profileA: userB, profileB: userA };
+}
+
+async function areFriends(userA, userB) {
+  const pair = normalizeFriendPair(userA, userB);
+  const { data, error } = await supabase
+    .from('friendships')
+    .select('profile_a')
+    .eq('profile_a', pair.profileA)
+    .eq('profile_b', pair.profileB)
+    .maybeSingle();
+
+  if (error) throw error;
+  return Boolean(data);
 }
 
 export function normalizeConversation(conversation) {

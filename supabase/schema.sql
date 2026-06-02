@@ -45,6 +45,25 @@ create table if not exists public.message_receipts (
   primary key (message_id, profile_id)
 );
 
+create table if not exists public.friend_requests (
+  id uuid primary key default gen_random_uuid(),
+  requester_id uuid not null references public.profiles(id) on delete cascade,
+  recipient_id uuid not null references public.profiles(id) on delete cascade,
+  status text not null default 'pending' check (status in ('pending', 'accepted', 'rejected')),
+  created_at timestamptz not null default now(),
+  responded_at timestamptz,
+  unique (requester_id, recipient_id),
+  check (requester_id <> recipient_id)
+);
+
+create table if not exists public.friendships (
+  profile_a uuid not null references public.profiles(id) on delete cascade,
+  profile_b uuid not null references public.profiles(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (profile_a, profile_b),
+  check (profile_a < profile_b)
+);
+
 alter table public.profiles
   add column if not exists last_seen_at timestamptz;
 
@@ -86,6 +105,12 @@ create index if not exists idx_participants_profile
 
 create index if not exists idx_receipts_profile
   on public.message_receipts(profile_id);
+
+create index if not exists idx_friend_requests_recipient
+  on public.friend_requests(recipient_id, status);
+
+create index if not exists idx_friendships_profile_b
+  on public.friendships(profile_b);
 
 create or replace function public.touch_updated_at()
 returns trigger
@@ -136,6 +161,8 @@ alter table public.conversations enable row level security;
 alter table public.conversation_participants enable row level security;
 alter table public.messages enable row level security;
 alter table public.message_receipts enable row level security;
+alter table public.friend_requests enable row level security;
+alter table public.friendships enable row level security;
 
 drop policy if exists "Profiles are visible to authenticated users" on public.profiles;
 create policy "Profiles are visible to authenticated users"
@@ -217,6 +244,31 @@ using (
       and cp.profile_id = auth.uid()
   )
 );
+
+drop policy if exists "Users see their own friend requests" on public.friend_requests;
+create policy "Users see their own friend requests"
+on public.friend_requests for select
+to authenticated
+using (auth.uid() = requester_id or auth.uid() = recipient_id);
+
+drop policy if exists "Users create outgoing friend requests" on public.friend_requests;
+create policy "Users create outgoing friend requests"
+on public.friend_requests for insert
+to authenticated
+with check (auth.uid() = requester_id and requester_id <> recipient_id);
+
+drop policy if exists "Recipients update friend requests" on public.friend_requests;
+create policy "Recipients update friend requests"
+on public.friend_requests for update
+to authenticated
+using (auth.uid() = recipient_id)
+with check (auth.uid() = recipient_id);
+
+drop policy if exists "Users see their friendships" on public.friendships;
+create policy "Users see their friendships"
+on public.friendships for select
+to authenticated
+using (auth.uid() = profile_a or auth.uid() = profile_b);
 
 insert into storage.buckets (id, name, public)
 values ('avatars', 'avatars', true), ('chat-files', 'chat-files', true)

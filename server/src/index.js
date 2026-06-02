@@ -10,13 +10,19 @@ import {
   createDirectConversation,
   deleteMessage,
   editMessage,
+  acceptFriendRequest,
   ensureProfile,
   getConversationForUser,
   listConversations,
+  listFriends,
+  listFriendRequests,
   listMessages,
   markConversationRead,
+  rejectFriendRequest,
   saveMessage,
+  sendFriendRequest,
   searchProfiles,
+  listUsersWithFriendState,
   updateLastSeen
 } from './chatStore.js';
 
@@ -66,6 +72,77 @@ app.get('/api/profiles/search', requireAuth, async (req, res) => {
     await ensureProfile(req.user);
     const profiles = await searchProfiles(req.user.id, String(req.query.q || ''));
     res.json({ profiles });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+app.get('/api/users', requireAuth, async (req, res) => {
+  try {
+    await ensureProfile(req.user);
+    const users = await listUsersWithFriendState(req.user.id);
+    res.json({ users });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+app.get('/api/friends', requireAuth, async (req, res) => {
+  try {
+    await ensureProfile(req.user);
+    const friends = await listFriends(req.user.id);
+    res.json({ friends });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+app.get('/api/friend-requests', requireAuth, async (req, res) => {
+  try {
+    await ensureProfile(req.user);
+    const requests = await listFriendRequests(req.user.id);
+    res.json({ requests });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+app.post('/api/friend-requests', requireAuth, async (req, res) => {
+  try {
+    await ensureProfile(req.user);
+    const { recipientId } = req.body;
+    if (!recipientId || typeof recipientId !== 'string') {
+      return res.status(400).json({ error: 'recipientId is required' });
+    }
+
+    const result = await sendFriendRequest(req.user.id, recipientId);
+    io.to(`user:${recipientId}`).emit('friend-request:new', { requesterId: req.user.id });
+    res.status(201).json(result);
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+app.post('/api/friend-requests/:id/accept', requireAuth, async (req, res) => {
+  try {
+    await ensureProfile(req.user);
+    const result = await acceptFriendRequest(req.params.id, req.user.id);
+    for (const participant of result.conversation.participants) {
+      io.to(`user:${participant.id}`).emit('conversation:upsert', result.conversation);
+      io.to(`user:${participant.id}`).emit('friend-request:update', { requestId: req.params.id, status: 'accepted' });
+    }
+    res.json(result);
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+app.post('/api/friend-requests/:id/reject', requireAuth, async (req, res) => {
+  try {
+    await ensureProfile(req.user);
+    const request = await rejectFriendRequest(req.params.id, req.user.id);
+    io.to(`user:${request.requester_id}`).emit('friend-request:update', { requestId: req.params.id, status: 'rejected' });
+    res.json({ request });
   } catch (error) {
     handleError(res, error);
   }
