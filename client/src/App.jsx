@@ -8,13 +8,21 @@ import {
   File,
   ArrowLeft,
   Bell,
+  Accessibility,
+  Database,
+  Globe2,
+  HelpCircle,
   Image,
   KeyRound,
+  LockKeyhole,
   LogOut,
+  Menu,
   MessageCircle,
+  MessageSquareText,
   Mic,
   Moon,
   Paperclip,
+  Palette,
   Plus,
   Search,
   Send,
@@ -23,15 +31,27 @@ import {
   Sparkles,
   Sun,
   Trash2,
-  Volume2,
+  UserCog,
+  UserPlus,
   Wifi,
-  X,
-  Settings
+  X
 } from 'lucide-react';
 import { apiFetch, API_URL } from './lib/api.js';
 import { hasSupabaseConfig, supabase } from './lib/supabase.js';
 
 const EMOJIS = ['😀', '😂', '😍', '🔥', '👍', '🙏', '🎉', '❤️', '😎', '😢', '🤝', '🚀'];
+
+const SETTINGS_SECTIONS = [
+  { id: 'account', title: 'Account', subtitle: 'Profile, password, sessions', icon: UserCog },
+  { id: 'privacy', title: 'Privacy', subtitle: 'Friend requests and visibility', icon: LockKeyhole },
+  { id: 'chats', title: 'Chats', subtitle: 'Theme, font size, chat history', icon: MessageSquareText },
+  { id: 'notifications', title: 'Notifications', subtitle: 'Messages, requests, sounds', icon: Bell },
+  { id: 'storage', title: 'Storage and data', subtitle: 'Uploads and media usage', icon: Database },
+  { id: 'accessibility', title: 'Accessibility', subtitle: 'Motion, contrast, readability', icon: Accessibility },
+  { id: 'language', title: 'App language', subtitle: 'English and locale settings', icon: Globe2 },
+  { id: 'help', title: 'Help and feedback', subtitle: 'Privacy policy and support', icon: HelpCircle },
+  { id: 'invite', title: 'Invite a friend', subtitle: 'Share your chat app', icon: UserPlus }
+];
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -188,8 +208,6 @@ function Chat({ session }) {
   const socketRef = useRef(null);
   const fileInputRef = useRef(null);
   const messageListRef = useRef(null);
-  const settingsRef = useRef(null);
-  const notificationsRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const typingTimerRef = useRef(null);
@@ -210,6 +228,7 @@ function Chat({ session }) {
   const [newChatQuery, setNewChatQuery] = useState('');
   const [chatSearch, setChatSearch] = useState('');
   const [sidebarTab, setSidebarTab] = useState('chats');
+  const [settingsCategory, setSettingsCategory] = useState('account');
   const [allUsers, setAllUsers] = useState([]);
   const [friends, setFriends] = useState([]);
   const [friendRequests, setFriendRequests] = useState([]);
@@ -223,11 +242,9 @@ function Chat({ session }) {
   const [typingUsers, setTypingUsers] = useState(new Set());
   const [profileModal, setProfileModal] = useState(null);
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem('soundOn') !== 'false');
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [unreadCounts, setUnreadCounts] = useState({});
   const [incomingToasts, setIncomingToasts] = useState([]);
-  const [notificationOpen, setNotificationOpen] = useState(false);
   const [notifications, setNotifications] = useState([]);
 
   const activeConversation = conversations.find((item) => item.id === activeId);
@@ -266,20 +283,6 @@ function Chat({ session }) {
   }, [conversations]);
 
   useEffect(() => {
-    function closeSettings(event) {
-      if (settingsRef.current && !settingsRef.current.contains(event.target)) {
-        setSettingsOpen(false);
-      }
-      if (notificationsRef.current && !notificationsRef.current.contains(event.target)) {
-        setNotificationOpen(false);
-      }
-    }
-
-    document.addEventListener('mousedown', closeSettings);
-    return () => document.removeEventListener('mousedown', closeSettings);
-  }, []);
-
-  useEffect(() => {
     async function loadInitialData() {
       try {
         const [meResponse, conversationsResponse] = await Promise.all([
@@ -288,7 +291,7 @@ function Chat({ session }) {
         ]);
         setProfile(meResponse.profile);
         setConversations(conversationsResponse.conversations);
-        setActiveId(conversationsResponse.conversations[0]?.id || null);
+        setActiveId(null);
         loadSocialData();
       } catch (error) {
         setNotice(error.message);
@@ -484,7 +487,6 @@ function Chat({ session }) {
     setMobileChatOpen(true);
     setUnreadCounts((current) => ({ ...current, [conversationId]: 0 }));
     setNotifications((current) => current.filter((item) => item.conversationId !== conversationId));
-    setNotificationOpen(false);
   }
 
   async function loadOlderMessages() {
@@ -680,6 +682,9 @@ function Chat({ session }) {
     <main className={`chat-shell ${mobileChatOpen ? 'mobile-chat-open' : ''}`}>
       <aside className="sidebar">
         <header className="sidebar-header">
+          <button className={`icon-button menu-toggle ${sidebarTab === 'settings' ? 'active-tool' : ''}`} onClick={() => { setSidebarTab('settings'); setActiveId(null); setMobileChatOpen(false); }} title="Menu" aria-label="Menu">
+            <Menu size={18} />
+          </button>
           <button className="profile-chip" onClick={() => setProfileModal({ type: 'self', profile })}>
             <Avatar profile={profile} label={profile?.display_name || session.user.email} />
             <span>
@@ -688,55 +693,11 @@ function Chat({ session }) {
             </span>
           </button>
           <div className="header-actions">
-            <div className="notification-wrap" ref={notificationsRef}>
-              <button className="icon-button" onClick={() => setNotificationOpen(!notificationOpen)} title="Notifications" aria-label="Notifications">
+            <div className="notification-wrap">
+              <button className={`icon-button ${sidebarTab === 'notifications' ? 'active-tool' : ''}`} onClick={() => setSidebarTab('notifications')} title="Notifications" aria-label="Notifications">
                 <Bell size={18} />
                 {notificationCount > 0 && <b className="header-badge">{notificationCount}</b>}
               </button>
-              {notificationOpen && (
-                <div className="notification-panel">
-                  <header>
-                    <strong>Notifications</strong>
-                    {messageNotificationCount > 0 && <button onClick={() => setNotifications((current) => current.filter((item) => item.type === 'friend-request'))}>Clear</button>}
-                  </header>
-                  <div className="notification-list">
-                    {friendRequests.filter((request) => request.direction === 'incoming').map((request) => (
-                      <div key={request.id} className="notification-item request">
-                        <Avatar profile={request.requester} />
-                        <span>
-                          <strong>{request.requester.display_name}</strong>
-                          <small>Sent you a friend request</small>
-                        </span>
-                        <button onClick={() => respondToRequest(request.id, 'accept')}>Accept</button>
-                        <button className="ghost-action" onClick={() => respondToRequest(request.id, 'reject')}>Reject</button>
-                      </div>
-                    ))}
-                    {notifications.filter((item) => item.type !== 'friend-request').map((item) => (
-                      <button key={item.id} className="notification-item" onClick={() => item.conversationId && openConversation(item.conversationId)}>
-                        <span>
-                          <strong>{item.title}</strong>
-                          <small>{item.body}</small>
-                        </span>
-                      </button>
-                    ))}
-                    {!notifications.length && !friendRequests.some((request) => request.direction === 'incoming') && (
-                      <p className="empty-state compact">No notifications yet.</p>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-            <div className="settings-wrap" ref={settingsRef}>
-              <button className="icon-button" onClick={() => setSettingsOpen(!settingsOpen)} title="Settings" aria-label="Settings">
-                <Settings size={18} />
-              </button>
-              {settingsOpen && (
-                <div className="settings-menu">
-                  <button onClick={() => { setSoundOn(!soundOn); setSettingsOpen(false); }}><Volume2 size={16} /> {soundOn ? 'Sound on' : 'Sound off'}</button>
-                  <button onClick={() => { setTheme(theme === 'dark' ? 'light' : 'dark'); setSettingsOpen(false); }}>{theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />} {theme === 'dark' ? 'Light theme' : 'Dark theme'}</button>
-                  <button onClick={() => { setSettingsOpen(false); signOut(); }}><LogOut size={16} /> Sign out</button>
-                </div>
-              )}
             </div>
           </div>
         </header>
@@ -751,6 +712,61 @@ function Chat({ session }) {
           <button className={sidebarTab === 'friends' ? 'active' : ''} onClick={() => setSidebarTab('friends')}>Friends</button>
           <button className={sidebarTab === 'users' ? 'active' : ''} onClick={() => setSidebarTab('users')}>All Users</button>
         </div>
+
+        {sidebarTab === 'settings' && (
+          <div className="conversation-list settings-list">
+            <div className="settings-profile">
+              <Avatar profile={profile} label={profile?.display_name || session.user.email} large />
+              <span>
+                <strong>{profile?.display_name || session.user.email}</strong>
+                <small>{session.user.email}</small>
+              </span>
+            </div>
+            {SETTINGS_SECTIONS.map((section) => {
+              const Icon = section.icon;
+              return (
+                <button key={section.id} className={`settings-row ${settingsCategory === section.id ? 'active' : ''}`} onClick={() => { setSettingsCategory(section.id); setActiveId(null); setMobileChatOpen(true); }}>
+                  <Icon size={22} />
+                  <span>
+                    <strong>{section.title}</strong>
+                    <small>{section.subtitle}</small>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {sidebarTab === 'notifications' && (
+          <div className="conversation-list notification-section">
+            <div className="section-heading">
+              <strong>Notifications</strong>
+              {messageNotificationCount > 0 && <button onClick={() => setNotifications((current) => current.filter((item) => item.type === 'friend-request'))}>Clear messages</button>}
+            </div>
+            {friendRequests.filter((request) => request.direction === 'incoming').map((request) => (
+              <div key={request.id} className="notification-item request">
+                <Avatar profile={request.requester} />
+                <span>
+                  <strong>{request.requester.display_name}</strong>
+                  <small>Sent you a friend request</small>
+                </span>
+                <button onClick={() => respondToRequest(request.id, 'accept')}>Accept</button>
+                <button className="ghost-action" onClick={() => respondToRequest(request.id, 'reject')}>Reject</button>
+              </div>
+            ))}
+            {notifications.filter((item) => item.type !== 'friend-request').map((item) => (
+              <button key={item.id} className="notification-item" onClick={() => item.conversationId && openConversation(item.conversationId)}>
+                <span>
+                  <strong>{item.title}</strong>
+                  <small>{item.body}</small>
+                </span>
+              </button>
+            ))}
+            {!notifications.length && !friendRequests.some((request) => request.direction === 'incoming') && (
+              <p className="empty-state compact">No notifications yet.</p>
+            )}
+          </div>
+        )}
 
         {sidebarTab === 'chats' && (
           <>
@@ -823,8 +839,20 @@ function Chat({ session }) {
         )}
       </aside>
 
-      <section className="chat-panel">
-        {activeConversation ? (
+      <section className={`chat-panel ${sidebarTab === 'settings' ? 'settings-mode' : ''}`}>
+        {sidebarTab === 'settings' ? (
+          <SettingsDetail
+            category={settingsCategory}
+            profile={profile}
+            theme={theme}
+            setTheme={setTheme}
+            soundOn={soundOn}
+            setSoundOn={setSoundOn}
+            setProfileModal={setProfileModal}
+            signOut={signOut}
+            onBack={() => setMobileChatOpen(false)}
+          />
+        ) : activeConversation ? (
           <>
             <header className="chat-header">
               <button className="icon-button mobile-back" onClick={() => setMobileChatOpen(false)} title="Back to chats" aria-label="Back to chats">
@@ -893,7 +921,8 @@ function Chat({ session }) {
         ) : (
           <div className="no-chat">
             <MessageCircle size={48} />
-            <h2>Select or start a conversation</h2>
+            <h2>Small Chat</h2>
+            <p>Your private friend-circle messenger is ready.</p>
           </div>
         )}
       </section>
@@ -941,6 +970,161 @@ function RelationshipAction({ user, onRequest, onChat }) {
   }
 
   return <button onClick={() => onRequest(user.id)}>Request</button>;
+}
+
+function SettingsDetail({ category, profile, theme, setTheme, soundOn, setSoundOn, setProfileModal, signOut, onBack }) {
+  const section = SETTINGS_SECTIONS.find((item) => item.id === category) || SETTINGS_SECTIONS[0];
+  const Icon = section.icon;
+
+  return (
+    <div className="settings-detail">
+      <header>
+        <button className="icon-button mobile-back" onClick={onBack} title="Back to settings" aria-label="Back to settings">
+          <ArrowLeft size={18} />
+        </button>
+        <span className="settings-detail-icon"><Icon size={26} /></span>
+        <div>
+          <h2>{section.title}</h2>
+          <p>{section.subtitle}</p>
+        </div>
+      </header>
+
+      {category === 'account' && (
+        <div className="settings-card-list">
+          <button className="settings-card" onClick={() => setProfileModal({ type: 'self', profile })}>
+            <strong>Edit profile</strong>
+            <small>Change display name and profile picture.</small>
+          </button>
+          <button className="settings-card" onClick={signOut}>
+            <strong>Sign out</strong>
+            <small>End this session on the current device.</small>
+          </button>
+          <div className="settings-card muted">
+            <strong>Change password</strong>
+            <small>Use Supabase password reset flow. This can be wired to email reset next.</small>
+          </div>
+        </div>
+      )}
+
+      {category === 'privacy' && (
+        <div className="settings-card-list">
+          <div className="settings-card">
+            <strong>Friend requests required</strong>
+            <small>Only accepted friends can start chats with you.</small>
+          </div>
+          <div className="settings-card">
+            <strong>All users directory</strong>
+            <small>Registered users can find each other and send requests.</small>
+          </div>
+          <div className="settings-card muted">
+            <strong>Blocked accounts</strong>
+            <small>Planned: block users and hide future requests/messages.</small>
+          </div>
+        </div>
+      )}
+
+      {category === 'chats' && (
+        <div className="settings-card-list">
+          <div className="settings-card inline-setting">
+            <span>
+              <strong>Theme</strong>
+              <small>Switch between light and dark mode.</small>
+            </span>
+            <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? 'Light' : 'Dark'}</button>
+          </div>
+          <div className="settings-card muted">
+            <strong>Font size</strong>
+            <small>Planned: compact, comfortable, and large message text.</small>
+          </div>
+          <div className="settings-card muted">
+            <strong>Chat wallpaper</strong>
+            <small>Planned: choose chat background colors or image.</small>
+          </div>
+        </div>
+      )}
+
+      {category === 'notifications' && (
+        <div className="settings-card-list">
+          <div className="settings-card inline-setting">
+            <span>
+              <strong>Notification sound</strong>
+              <small>Play a tone for new messages and friend requests.</small>
+            </span>
+            <button onClick={() => setSoundOn(!soundOn)}>{soundOn ? 'On' : 'Off'}</button>
+          </div>
+          <div className="settings-card">
+            <strong>Notification center</strong>
+            <small>Use the bell button to view messages and friend requests.</small>
+          </div>
+          <div className="settings-card muted">
+            <strong>Custom tones</strong>
+            <small>Planned: choose different sounds for messages and requests.</small>
+          </div>
+        </div>
+      )}
+
+      {category === 'storage' && (
+        <div className="settings-card-list">
+          <div className="settings-card">
+            <strong>Media storage</strong>
+            <small>Profile pictures and chat files are stored in Supabase Storage.</small>
+          </div>
+          <div className="settings-card muted">
+            <strong>Auto-download</strong>
+            <small>Planned: control image/file download behavior.</small>
+          </div>
+        </div>
+      )}
+
+      {category === 'accessibility' && (
+        <div className="settings-card-list">
+          <div className="settings-card">
+            <strong>Readable layout</strong>
+            <small>Fixed chat height, larger tap targets, and mobile chat navigation are enabled.</small>
+          </div>
+          <div className="settings-card muted">
+            <strong>Reduce motion</strong>
+            <small>Planned: disable elastic animations.</small>
+          </div>
+        </div>
+      )}
+
+      {category === 'language' && (
+        <div className="settings-card-list">
+          <div className="settings-card">
+            <strong>English</strong>
+            <small>The app currently follows English UI text.</small>
+          </div>
+          <div className="settings-card muted">
+            <strong>More languages</strong>
+            <small>Planned: add language files for localization.</small>
+          </div>
+        </div>
+      )}
+
+      {category === 'help' && (
+        <div className="settings-card-list">
+          <div className="settings-card">
+            <strong>Privacy policy</strong>
+            <small>Your chats, files, and profiles are stored in your Supabase project.</small>
+          </div>
+          <div className="settings-card">
+            <strong>Support</strong>
+            <small>For now, contact the app owner directly for account or data help.</small>
+          </div>
+        </div>
+      )}
+
+      {category === 'invite' && (
+        <div className="settings-card-list">
+          <div className="settings-card">
+            <strong>Invite link</strong>
+            <small>Share your deployed Vercel URL with friends so they can register.</small>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function MessageBubble({ message, own, isRead, onEdit, onDelete }) {
